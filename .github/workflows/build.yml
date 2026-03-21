@@ -2,287 +2,48 @@ name: Build iOS app
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/build.yml"
-
-env:
-  ARCHIVE_GDRIVE_ID: "1SCyMKUsUteUcrOYQQYhyDfFMuW3eVz42"
-  IPA_NAME: "TF27-iOS"
 
 jobs:
   build_ios:
     runs-on: macos-latest
-    timeout-minutes: 60
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download archive from Drive
+      - name: Build archive and IPA
         shell: bash
         run: |
-          set -euo pipefail
+          set -xe
 
-          mkdir -p _work/src
-          python3 -m venv _work/venv
-          _work/venv/bin/python -m pip install --upgrade pip
-          _work/venv/bin/python -m pip install gdown
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install gdown
 
-          ok=0
-          for i in 1 2 3; do
-            if _work/venv/bin/gdown "https://drive.google.com/uc?id=${{ env.ARCHIVE_GDRIVE_ID }}" -O _work/archive.zip; then
-              ok=1
-              break
-            fi
-            echo "gdown failed (attempt $i), retrying..."
-            rm -f _work/archive.zip || true
-            sleep $((i * 5))
-          done
+          .venv/bin/gdown "https://drive.google.com/uc?id=1fPKXXZJtbRlU7sq8GaITM5lRBBV4I0xk" -O archive.zip
+          unzip -o archive.zip -d .
 
-          if [[ "$ok" -ne 1 || ! -s _work/archive.zip ]]; then
-            echo "ERROR: Failed to download archive from Google Drive."
-            exit 1
-          fi
+          PROJECT="$(find . -name '*.xcodeproj' -print -quit)"
+          [ -n "$PROJECT" ] || { echo "No .xcodeproj found"; exit 1; }
 
-          unzip -tq _work/archive.zip
-
-          # Extract with Python to tolerate broken/non-UTF filenames in some archives.
-          _work/venv/bin/python - <<'PY'
-          import pathlib
-          import shutil
-          import sys
-          import zipfile
-
-          archive = pathlib.Path("_work/archive.zip")
-          out_root = pathlib.Path("_work/src")
-          out_root.mkdir(parents=True, exist_ok=True)
-
-          skip_prefixes = ("Omake/",)
-          extracted = 0
-          skipped = 0
-
-          with zipfile.ZipFile(archive) as zf:
-            for info in zf.infolist():
-              raw_name = info.filename.replace("\\", "/")
-              if not raw_name or raw_name.endswith("/"):
-                continue
-              if any(raw_name.startswith(prefix) for prefix in skip_prefixes):
-                skipped += 1
-                continue
-
-              pure = pathlib.PurePosixPath(raw_name)
-              safe_parts = [p for p in pure.parts if p not in ("", ".", "..")]
-              if not safe_parts:
-                skipped += 1
-                continue
-
-              target = out_root.joinpath(*safe_parts)
-              try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(info, "r") as src, open(target, "wb") as dst:
-                  shutil.copyfileobj(src, dst)
-                extracted += 1
-              except OSError as exc:
-                skipped += 1
-                print(f"Skipping {raw_name!r}: {exc}")
-
-          print(f"Extracted {extracted} files, skipped {skipped}.")
-          if extracted == 0:
-            print("ERROR: extraction failed (0 files extracted).")
-            sys.exit(1)
-          PY
-
-      - name: Resolve game folder in archive
-        id: resolve_game
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT="_work/src"
-          GAME_PATH=""
-          CANDS_FILE="_work/candidates_all.txt"
-          UNIQUE_FILE="_work/candidates_unique.txt"
-          : > "$CANDS_FILE"
-
-          while IFS= read -r cand; do
-            if [[ -f "$cand/index.html" && -d "$cand/data" && -d "$cand/tyrano" ]]; then
-              echo "$cand" >> "$CANDS_FILE"
-            fi
-          done < <(find "$ROOT" -type d -name "www" -print)
-
-          while IFS= read -r idx; do
-            base="$(dirname "$idx")"
-            if [[ -d "$base/data" && -d "$base/tyrano" ]]; then
-              echo "$base" >> "$CANDS_FILE"
-            fi
-          done < <(find "$ROOT" -type f -name "index.html" -print)
-
-          awk 'NF && !seen[$0]++' "$CANDS_FILE" > "$UNIQUE_FILE"
-
-          BEST_SCORE=-999999999
-          while IFS= read -r cand; do
-            [[ -n "$cand" ]] || continue
-            SIZE_KB="$(du -sk "$cand" | awk '{print $1}')"
-            SCORE="$SIZE_KB"
-
-            # Explicit archive layout wins when present.
-            if [[ "$cand" == "$ROOT/ios_port_bundle/www" ]]; then
-              SCORE=$((SCORE + 100000000))
-            fi
-
-            # Penalize template built-in web assets so we don't pick tiny default www.
-            case "$cand" in
-              *"/ios-rpgmaker-native/"*|*"/RPG Maker MZ Framework/"*)
-                SCORE=$((SCORE - 90000000))
-                ;;
-            esac
-
-            echo "Candidate: $cand (size=${SIZE_KB}KB score=${SCORE})"
-
-            if (( SCORE > BEST_SCORE )); then
-              BEST_SCORE="$SCORE"
-              GAME_PATH="$cand"
-            fi
-          done < "$UNIQUE_FILE"
-
-          if [[ -z "$GAME_PATH" ]]; then
-            echo "ERROR: Could not find valid game folder (index.html + data + tyrano)."
-            exit 1
-          fi
-
-          echo "Game folder: $GAME_PATH"
-          du -sh "$GAME_PATH" || true
-          echo "game_path=$GAME_PATH" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve iOS template/project
-        id: resolve_ios
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT="_work/src"
-          PROJECT=""
-
-          # Prefer xcode project already inside zip (your bundled ios-rpgmaker-native).
-          while IFS= read -r cand; do
-            case "$cand" in
-              *ios-rpgmaker-native*|*"RPG Maker MZ Framework"* )
-                PROJECT="$cand"
-                break
-                ;;
-            esac
-          done < <(find "$ROOT" -name "*.xcodeproj" -print)
-
-          # If no preferred match, pick first xcode project from archive.
-          if [[ -z "$PROJECT" ]]; then
-            PROJECT="$(find "$ROOT" -name "*.xcodeproj" -print -quit || true)"
-          fi
-
-          if [[ -z "$PROJECT" ]]; then
-            echo "ERROR: No .xcodeproj found in archive. Please include ios-rpgmaker-native in the uploaded zip."
-            exit 1
-          fi
-
-          PROJ_DIR="$(dirname "$PROJECT")"
-          echo "Using project: $PROJECT"
-          echo "Project dir: $PROJ_DIR"
-
-          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
-          echo "project_dir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Inject game files into template www
-        id: prepare_ios
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROJ_DIR="${{ steps.resolve_ios.outputs.project_dir }}"
-
-          rm -rf "$PROJ_DIR/www"
-          mkdir -p "$PROJ_DIR/www"
-          rsync -a --delete "${{ steps.resolve_game.outputs.game_path }}/" "$PROJ_DIR/www/"
-
-          # Patch common WKWebView read-access issue.
-          VIEW="$(find "$PROJ_DIR" -maxdepth 3 -name "ViewController.swift" -print -quit || true)"
-          if [[ -n "$VIEW" ]]; then
-            sed -i '' 's/allowingReadAccessTo: htmlPath)/allowingReadAccessTo: htmlPath.deletingLastPathComponent())/g' "$VIEW"
-          fi
-
-          PROJECT="${{ steps.resolve_ios.outputs.project }}"
           SCHEME="$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{flag=1;next} flag && NF {print; exit}' | xargs)"
-          if [[ -z "$SCHEME" ]]; then
-            echo "ERROR: No build scheme found in $PROJECT"
-            exit 1
-          fi
-
-          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
-          echo "Using scheme: $SCHEME"
-
-      - name: Build archive
-        shell: bash
-        run: |
-          set -euo pipefail
+          [ -n "$SCHEME" ] || { echo "No scheme found in $PROJECT"; exit 1; }
 
           xcodebuild archive \
-            -project "${{ steps.resolve_ios.outputs.project }}" \
-            -scheme "${{ steps.prepare_ios.outputs.scheme }}" \
-            -archivePath "_work/build.xcarchive" \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -archivePath "build.xcarchive" \
             -configuration Release \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-      - name: Force inject full game into archived app
-        id: force_inject
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP_PATH="$(find "_work/build.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" -print -quit || true)"
-          if [[ -z "$APP_PATH" ]]; then
-            echo "ERROR: No .app found in archive output."
-            exit 1
-          fi
-
-          rm -rf "$APP_PATH/www"
-          mkdir -p "$APP_PATH/www"
-          rsync -a --delete "${{ steps.resolve_game.outputs.game_path }}/" "$APP_PATH/www/"
-
-          GAME_KB="$(du -sk "${{ steps.resolve_game.outputs.game_path }}" | awk '{print $1}')"
-          APP_WWW_KB="$(du -sk "$APP_PATH/www" | awk '{print $1}')"
-          echo "Game size KB: $GAME_KB"
-          echo "App www size KB: $APP_WWW_KB"
-
-          # Hard fail if archived www is suspiciously small after copy.
-          MIN_EXPECTED=$((GAME_KB * 80 / 100))
-          if (( APP_WWW_KB < MIN_EXPECTED )); then
-            echo "ERROR: Injected app/www is too small compared to source game."
-            exit 1
-          fi
-
-          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
-
-      - name: Package IPA
-        id: package
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP_PATH="${{ steps.force_inject.outputs.app_path }}"
-
-          mkdir -p _work/Payload
-          cp -R "$APP_PATH" _work/Payload/
-          (cd _work && /usr/bin/zip -qry "${{ env.IPA_NAME }}.ipa" Payload)
-
-          IPA_PATH="_work/${{ env.IPA_NAME }}.ipa"
-          ls -lh "$IPA_PATH"
-          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+          mkdir -p Payload
+          mv "build.xcarchive/Products/Applications/"*.app Payload/
+          zip -r TF27-iOS.ipa Payload
+          mv TF27-iOS.ipa "${{ runner.temp }}/TF27-iOS.ipa"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.IPA_NAME }}
-          path: ${{ steps.package.outputs.ipa_path }}
+          name: TF27
+          path: ${{ runner.temp }}/TF27-iOS.ipa
           retention-days: 3
