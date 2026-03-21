@@ -109,6 +109,44 @@ jobs:
           echo "Injected web root: $WEB_ROOT"
           du -sh "$WEB_ROOT" || true
 
+          # Patch iOS wrapper to prevent no-audio issues:
+          # 1) allow WKWebView to read all files under www
+          # 2) force AVAudioSession playback category (works even in silent mode)
+          VIEW_SWIFT="$(find "$PROJ_DIR" -name "ViewController.swift" -print -quit || true)"
+          if [[ -n "$VIEW_SWIFT" ]]; then
+            sed -i '' 's/allowingReadAccessTo: htmlPath)/allowingReadAccessTo: htmlPath.deletingLastPathComponent())/g' "$VIEW_SWIFT"
+          fi
+
+          APP_DELEGATE_SWIFT="$(find "$PROJ_DIR" -name "AppDelegate.swift" -print -quit || true)"
+          if [[ -n "$APP_DELEGATE_SWIFT" ]]; then
+            APP_DELEGATE_SWIFT="$APP_DELEGATE_SWIFT" .venv/bin/python - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["APP_DELEGATE_SWIFT"])
+          text = path.read_text(encoding="utf-8")
+
+          if "import AVFoundation" not in text:
+              text = text.replace("import UIKit", "import UIKit\nimport AVFoundation", 1)
+
+          marker = "func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {"
+          if "AVAudioSession.sharedInstance().setCategory" not in text and marker in text:
+              inject = (
+                  marker
+                  + "\n"
+                  + "        do {\n"
+                  + "            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])\n"
+                  + "            try AVAudioSession.sharedInstance().setActive(true)\n"
+                  + "        } catch {\n"
+                  + "            print(\"Audio session error: \\(error)\")\n"
+                  + "        }\n"
+              )
+              text = text.replace(marker, inject, 1)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+          fi
+
           SCHEME="$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{flag=1;next} flag && NF {print; exit}' | xargs)"
           [ -n "$SCHEME" ] || { echo "No scheme found in $PROJECT"; exit 1; }
 
