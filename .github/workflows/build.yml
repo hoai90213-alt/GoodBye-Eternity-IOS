@@ -25,9 +25,51 @@ jobs:
           .venv/bin/python -m pip install gdown
 
           .venv/bin/gdown "https://drive.google.com/uc?id=1SCyMKUsUteUcrOYQQYhyDfFMuW3eVz42" -O archive.zip
-          unzip -o archive.zip -d .
+          mkdir -p _work/src
 
-          PROJECT="$(find . -name '*.xcodeproj' -print -quit)"
+          # unzip can fail on some non-UTF filenames in this archive; extract via Python instead.
+          .venv/bin/python - <<'PY'
+          import pathlib
+          import shutil
+          import sys
+          import zipfile
+
+          archive = pathlib.Path("archive.zip")
+          out_root = pathlib.Path("_work/src")
+          out_root.mkdir(parents=True, exist_ok=True)
+
+          extracted = 0
+          skipped = 0
+
+          with zipfile.ZipFile(archive) as zf:
+            for info in zf.infolist():
+              raw_name = info.filename.replace("\\", "/")
+              if not raw_name or raw_name.endswith("/"):
+                continue
+
+              pure = pathlib.PurePosixPath(raw_name)
+              safe_parts = [p for p in pure.parts if p not in ("", ".", "..")]
+              if not safe_parts:
+                skipped += 1
+                continue
+
+              target = out_root.joinpath(*safe_parts)
+              try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src, open(target, "wb") as dst:
+                  shutil.copyfileobj(src, dst)
+                extracted += 1
+              except OSError as exc:
+                skipped += 1
+                print(f"Skipping {raw_name!r}: {exc}")
+
+          print(f"Extracted {extracted} files, skipped {skipped}.")
+          if extracted == 0:
+            print("ERROR: extraction failed (0 files extracted).")
+            sys.exit(1)
+          PY
+
+          PROJECT="$(find _work/src -name '*.xcodeproj' -print -quit)"
           [ -n "$PROJECT" ] || { echo "No .xcodeproj found"; exit 1; }
 
           SCHEME="$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{flag=1;next} flag && NF {print; exit}' | xargs)"
@@ -36,15 +78,15 @@ jobs:
           xcodebuild archive \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
-            -archivePath "build.xcarchive" \
+            -archivePath "_work/build.xcarchive" \
             -configuration Release \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-          mkdir -p Payload
-          mv "build.xcarchive/Products/Applications/"*.app Payload/
-          zip -r TF27-iOS.ipa Payload
-          mv TF27-iOS.ipa "${{ runner.temp }}/TF27-iOS.ipa"
+          mkdir -p _work/Payload
+          mv "_work/build.xcarchive/Products/Applications/"*.app _work/Payload/
+          (cd _work && zip -r TF27-iOS.ipa Payload)
+          mv _work/TF27-iOS.ipa "${{ runner.temp }}/TF27-iOS.ipa"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
