@@ -45,9 +45,51 @@ jobs:
 
           unzip -tq _work/archive.zip
 
-          # Some archives include broken/non-UTF filenames under Omake that make unzip abort.
-          # They are not needed for iOS packaging, so skip them to keep extraction non-interactive.
-          unzip -q -o _work/archive.zip -d _work/src -x "Omake/*" "*/Omake/*"
+          # Extract with Python to tolerate broken/non-UTF filenames in some archives.
+          _work/venv/bin/python - <<'PY'
+          import pathlib
+          import shutil
+          import sys
+          import zipfile
+
+          archive = pathlib.Path("_work/archive.zip")
+          out_root = pathlib.Path("_work/src")
+          out_root.mkdir(parents=True, exist_ok=True)
+
+          skip_prefixes = ("Omake/",)
+          extracted = 0
+          skipped = 0
+
+          with zipfile.ZipFile(archive) as zf:
+            for info in zf.infolist():
+              raw_name = info.filename.replace("\\", "/")
+              if not raw_name or raw_name.endswith("/"):
+                continue
+              if any(raw_name.startswith(prefix) for prefix in skip_prefixes):
+                skipped += 1
+                continue
+
+              pure = pathlib.PurePosixPath(raw_name)
+              safe_parts = [p for p in pure.parts if p not in ("", ".", "..")]
+              if not safe_parts:
+                skipped += 1
+                continue
+
+              target = out_root.joinpath(*safe_parts)
+              try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src, open(target, "wb") as dst:
+                  shutil.copyfileobj(src, dst)
+                extracted += 1
+              except OSError as exc:
+                skipped += 1
+                print(f"Skipping {raw_name!r}: {exc}")
+
+          print(f"Extracted {extracted} files, skipped {skipped}.")
+          if extracted == 0:
+            print("ERROR: extraction failed (0 files extracted).")
+            sys.exit(1)
+          PY
 
       - name: Resolve game folder in archive
         id: resolve_game
