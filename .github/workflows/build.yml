@@ -72,6 +72,39 @@ jobs:
           PROJECT="$(find _work/src -name '*.xcodeproj' -print -quit)"
           [ -n "$PROJECT" ] || { echo "No .xcodeproj found"; exit 1; }
 
+          GAME_ROOT=""
+          while IFS= read -r idx; do
+            base="$(dirname "$idx")"
+            if [[ -d "$base/data" && -d "$base/tyrano" ]]; then
+              case "$base" in
+                *"/ios-rpgmaker-native/"*|*"/RPG Maker MZ Framework for Xcode 12/www"*)
+                  ;;
+                *)
+                  GAME_ROOT="$base"
+                  break
+                  ;;
+              esac
+            fi
+          done < <(find _work/src -type f -name "index.html" -print)
+          [ -n "$GAME_ROOT" ] || { echo "No game root found (index.html + data + tyrano)"; exit 1; }
+
+          PROJ_DIR="$(dirname "$PROJECT")"
+          rm -rf "$PROJ_DIR/www"
+          mkdir -p "$PROJ_DIR/www"
+
+          # If game root is extraction root, avoid copying template repo back into www.
+          if [[ "$GAME_ROOT" == "_work/src" || "$GAME_ROOT" == "$(pwd)/_work/src" ]]; then
+            rsync -a --delete \
+              --exclude "ios-rpgmaker-native/" \
+              --exclude "Omake/" \
+              "$GAME_ROOT/" "$PROJ_DIR/www/"
+          else
+            rsync -a --delete "$GAME_ROOT/" "$PROJ_DIR/www/"
+          fi
+
+          echo "Game root: $GAME_ROOT"
+          du -sh "$PROJ_DIR/www" || true
+
           SCHEME="$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{flag=1;next} flag && NF {print; exit}' | xargs)"
           [ -n "$SCHEME" ] || { echo "No scheme found in $PROJECT"; exit 1; }
 
