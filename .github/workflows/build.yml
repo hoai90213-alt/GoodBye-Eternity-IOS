@@ -22,10 +22,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 -m pip install --upgrade pip gdown
           mkdir -p _work/src
+          python3 -m venv _work/venv
+          _work/venv/bin/python -m pip install --upgrade pip
+          _work/venv/bin/python -m pip install gdown
 
-          gdown "https://drive.google.com/uc?id=${{ env.ARCHIVE_GDRIVE_ID }}" -O _work/archive.zip
+          _work/venv/bin/gdown "https://drive.google.com/uc?id=${{ env.ARCHIVE_GDRIVE_ID }}" -O _work/archive.zip
 
           unzip -q -o _work/archive.zip -d _work/src
 
