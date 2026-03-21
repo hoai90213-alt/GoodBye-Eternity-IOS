@@ -16,7 +16,7 @@ jobs:
           set -xe
 
           python -m pip install --upgrade pip gdown
-          gdown "https://drive.google.com/uc?id=1fPKXXZJtbRlU7sq8GaITM5lRBBV4I0xk" -O archive.zip
+          gdown "https://drive.google.com/file/d/1SCyMKUsUteUcrOYQQYhyDfFMuW3eVz42/view?usp=drive_link" -O archive.zip
           unzip -o archive.zip -d .
 
           PROJECT="$(find . -maxdepth 1 -name '*.xcodeproj' -print -quit)"
