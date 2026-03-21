@@ -89,21 +89,25 @@ jobs:
           [ -n "$GAME_ROOT" ] || { echo "No game root found (index.html + data + tyrano)"; exit 1; }
 
           PROJ_DIR="$(dirname "$PROJECT")"
-          rm -rf "$PROJ_DIR/www"
-          mkdir -p "$PROJ_DIR/www"
+          WEB_ROOT="$(find "$PROJ_DIR" -type d -name "www" -print -quit || true)"
+          [ -n "$WEB_ROOT" ] || { echo "No target www folder found near $PROJECT"; exit 1; }
+
+          rm -rf "$WEB_ROOT"
+          mkdir -p "$WEB_ROOT"
 
           # If game root is extraction root, avoid copying template repo back into www.
           if [[ "$GAME_ROOT" == "_work/src" || "$GAME_ROOT" == "$(pwd)/_work/src" ]]; then
             rsync -a --delete \
               --exclude "ios-rpgmaker-native/" \
               --exclude "Omake/" \
-              "$GAME_ROOT/" "$PROJ_DIR/www/"
+              "$GAME_ROOT/" "$WEB_ROOT/"
           else
-            rsync -a --delete "$GAME_ROOT/" "$PROJ_DIR/www/"
+            rsync -a --delete "$GAME_ROOT/" "$WEB_ROOT/"
           fi
 
           echo "Game root: $GAME_ROOT"
-          du -sh "$PROJ_DIR/www" || true
+          echo "Injected web root: $WEB_ROOT"
+          du -sh "$WEB_ROOT" || true
 
           SCHEME="$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{flag=1;next} flag && NF {print; exit}' | xargs)"
           [ -n "$SCHEME" ] || { echo "No scheme found in $PROJECT"; exit 1; }
