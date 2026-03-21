@@ -45,7 +45,9 @@ jobs:
 
           unzip -tq _work/archive.zip
 
-          unzip -q -o _work/archive.zip -d _work/src
+          # Some archives include broken/non-UTF filenames under Omake that make unzip abort.
+          # They are not needed for iOS packaging, so skip them to keep extraction non-interactive.
+          unzip -q -o _work/archive.zip -d _work/src -x "Omake/*" "*/Omake/*"
 
       - name: Resolve game folder in archive
         id: resolve_game
