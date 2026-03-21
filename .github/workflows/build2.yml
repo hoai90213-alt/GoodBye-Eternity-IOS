@@ -1,0 +1,46 @@
+name: Build iOS app
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_ios:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build archive and IPA
+        shell: bash
+        run: |
+          set -xe
+
+          python -m pip install --upgrade pip gdown
+          gdown "https://drive.google.com/uc?id=1fPKXXZJtbRlU7sq8GaITM5lRBBV4I0xk" -O archive.zip
+          unzip -o archive.zip -d .
+
+          PROJECT="$(find . -maxdepth 1 -name '*.xcodeproj' -print -quit)"
+          [ -n "$PROJECT" ] || { echo "No .xcodeproj found"; exit 1; }
+
+          SCHEME="$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{flag=1;next} flag && NF {print; exit}' | xargs)"
+          [ -n "$SCHEME" ] || { echo "No scheme found in $PROJECT"; exit 1; }
+
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -archivePath "build.xcarchive" \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+          mkdir -p Payload
+          mv "build.xcarchive/Products/Applications/"*.app Payload/
+          zip -r TF27-iOS.ipa Payload
+          mv TF27-iOS.ipa "${{ runner.temp }}/TF27-iOS.ipa"
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: TF27
+          path: ${{ runner.temp }}/TF27-iOS.ipa
+          retention-days: 3 
