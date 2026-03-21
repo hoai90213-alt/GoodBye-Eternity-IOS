@@ -103,30 +103,28 @@ jobs:
 
           ROOT="_work/src"
           GAME_PATH=""
+          CANDS_FILE="_work/candidates_all.txt"
+          UNIQUE_FILE="_work/candidates_unique.txt"
+          : > "$CANDS_FILE"
 
-          mapfile -t CANDIDATES < <(
-            while IFS= read -r cand; do
-              if [[ -f "$cand/index.html" && -d "$cand/data" && -d "$cand/tyrano" ]]; then
-                echo "$cand"
-              fi
-            done < <(find "$ROOT" -type d -name "www" -print)
+          while IFS= read -r cand; do
+            if [[ -f "$cand/index.html" && -d "$cand/data" && -d "$cand/tyrano" ]]; then
+              echo "$cand" >> "$CANDS_FILE"
+            fi
+          done < <(find "$ROOT" -type d -name "www" -print)
 
-            while IFS= read -r idx; do
-              base="$(dirname "$idx")"
-              if [[ -d "$base/data" && -d "$base/tyrano" ]]; then
-                echo "$base"
-              fi
-            done < <(find "$ROOT" -type f -name "index.html" -print)
-          )
+          while IFS= read -r idx; do
+            base="$(dirname "$idx")"
+            if [[ -d "$base/data" && -d "$base/tyrano" ]]; then
+              echo "$base" >> "$CANDS_FILE"
+            fi
+          done < <(find "$ROOT" -type f -name "index.html" -print)
 
-          if [[ "${#CANDIDATES[@]}" -gt 0 ]]; then
-            mapfile -t UNIQUE_CANDIDATES < <(printf "%s\n" "${CANDIDATES[@]}" | awk 'NF && !seen[$0]++')
-          else
-            UNIQUE_CANDIDATES=()
-          fi
+          awk 'NF && !seen[$0]++' "$CANDS_FILE" > "$UNIQUE_FILE"
 
           BEST_SCORE=-999999999
-          for cand in "${UNIQUE_CANDIDATES[@]}"; do
+          while IFS= read -r cand; do
+            [[ -n "$cand" ]] || continue
             SIZE_KB="$(du -sk "$cand" | awk '{print $1}')"
             SCORE="$SIZE_KB"
 
@@ -148,7 +146,7 @@ jobs:
               BEST_SCORE="$SCORE"
               GAME_PATH="$cand"
             fi
-          done
+          done < "$UNIQUE_FILE"
 
           if [[ -z "$GAME_PATH" ]]; then
             echo "ERROR: Could not find valid game folder (index.html + data + tyrano)."
