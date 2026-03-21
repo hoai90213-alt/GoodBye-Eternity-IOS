@@ -2,23 +2,11 @@ name: Build iOS app
 
 on:
   workflow_dispatch:
-    inputs:
-      archive_gdrive_id:
-        description: "Google Drive file ID of your .zip archive"
-        required: false
-        default: "1SCyMKUsUteUcrOYQQYhyDfFMuW3eVz42"
-      archive_url:
-        description: "Direct URL of your .zip archive (optional fallback)"
-        required: false
-        default: ""
-      ipa_name:
-        description: "Output IPA filename (without .ipa)"
-        required: false
-        default: "TF27-iOS"
-      template_repo:
-        description: "Fallback template repo URL if zip has no .xcodeproj"
-        required: false
-        default: "https://github.com/laguna783/ios-rpgmaker-native.git"
+
+env:
+  ARCHIVE_GDRIVE_ID: "1SCyMKUsUteUcrOYQQYhyDfFMuW3eVz42"
+  IPA_NAME: "TF27-iOS"
+  TEMPLATE_REPO: "https://github.com/laguna783/ios-rpgmaker-native.git"
 
 jobs:
   build_ios:
@@ -29,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download archive from Drive/URL
+      - name: Download archive from Drive
         shell: bash
         run: |
           set -euo pipefail
@@ -37,14 +25,7 @@ jobs:
           python3 -m pip install --upgrade pip gdown
           mkdir -p _work/src
 
-          if [[ -n "${{ inputs.archive_gdrive_id }}" ]]; then
-            gdown "https://drive.google.com/uc?id=${{ inputs.archive_gdrive_id }}" -O _work/archive.zip
-          elif [[ -n "${{ inputs.archive_url }}" ]]; then
-            curl -fL "${{ inputs.archive_url }}" -o _work/archive.zip
-          else
-            echo "ERROR: Provide archive_gdrive_id or archive_url"
-            exit 1
-          fi
+          gdown "https://drive.google.com/uc?id=${{ env.ARCHIVE_GDRIVE_ID }}" -O _work/archive.zip
 
           unzip -q -o _work/archive.zip -d _work/src
 
@@ -119,7 +100,7 @@ jobs:
           # Fallback: clone template repo if archive has no xcode project.
           if [[ -z "$PROJECT" ]]; then
             echo "No .xcodeproj in archive, cloning fallback template repo."
-            git clone --depth 1 "${{ inputs.template_repo }}" _work/template
+            git clone --depth 1 "${{ env.TEMPLATE_REPO }}" _work/template
             PROJECT="$(find _work/template -name "*.xcodeproj" -print -quit || true)"
           fi
 
@@ -190,15 +171,15 @@ jobs:
 
           mkdir -p _work/Payload
           cp -R "$APP_PATH" _work/Payload/
-          (cd _work && /usr/bin/zip -qry "${{ inputs.ipa_name }}.ipa" Payload)
+          (cd _work && /usr/bin/zip -qry "${{ env.IPA_NAME }}.ipa" Payload)
 
-          IPA_PATH="_work/${{ inputs.ipa_name }}.ipa"
+          IPA_PATH="_work/${{ env.IPA_NAME }}.ipa"
           ls -lh "$IPA_PATH"
           echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.ipa_name }}
+          name: ${{ env.IPA_NAME }}
           path: ${{ steps.package.outputs.ipa_path }}
           retention-days: 3
