@@ -19,7 +19,7 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install gdown
 
-          .venv/bin/gdown "https://drive.google.com/uc?id=1fPKXXZJtbRlU7sq8GaITM5lRBBV4I0xk" -O archive.zip
+          .venv/bin/gdown "https://drive.google.com/file/d/1SCyMKUsUteUcrOYQQYhyDfFMuW3eVz42/view?usp=sharing" -O archive.zip
           unzip -o archive.zip -d .
 
           PROJECT="$(find . -name '*.xcodeproj' -print -quit)"
