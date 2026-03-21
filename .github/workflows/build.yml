@@ -6,7 +6,6 @@ on:
 env:
   ARCHIVE_GDRIVE_ID: "1SCyMKUsUteUcrOYQQYhyDfFMuW3eVz42"
   IPA_NAME: "TF27-iOS"
-  TEMPLATE_REPO: "https://github.com/laguna783/ios-rpgmaker-native.git"
 
 jobs:
   build_ios:
@@ -100,31 +99,51 @@ jobs:
           ROOT="_work/src"
           GAME_PATH=""
 
-          # Case 1: archive contains ios_port_bundle/www
-          if [[ -f "$ROOT/ios_port_bundle/www/index.html" ]]; then
-            GAME_PATH="$ROOT/ios_port_bundle/www"
-          fi
-
-          # Case 2: any ready www folder containing game web root
-          if [[ -z "$GAME_PATH" ]]; then
+          mapfile -t CANDIDATES < <(
             while IFS= read -r cand; do
               if [[ -f "$cand/index.html" && -d "$cand/data" && -d "$cand/tyrano" ]]; then
-                GAME_PATH="$cand"
-                break
+                echo "$cand"
               fi
             done < <(find "$ROOT" -type d -name "www" -print)
-          fi
 
-          # Case 3: raw game root anywhere inside archive
-          if [[ -z "$GAME_PATH" ]]; then
             while IFS= read -r idx; do
               base="$(dirname "$idx")"
               if [[ -d "$base/data" && -d "$base/tyrano" ]]; then
-                GAME_PATH="$base"
-                break
+                echo "$base"
               fi
             done < <(find "$ROOT" -type f -name "index.html" -print)
+          )
+
+          if [[ "${#CANDIDATES[@]}" -gt 0 ]]; then
+            mapfile -t UNIQUE_CANDIDATES < <(printf "%s\n" "${CANDIDATES[@]}" | awk 'NF && !seen[$0]++')
+          else
+            UNIQUE_CANDIDATES=()
           fi
+
+          BEST_SCORE=-999999999
+          for cand in "${UNIQUE_CANDIDATES[@]}"; do
+            SIZE_KB="$(du -sk "$cand" | awk '{print $1}')"
+            SCORE="$SIZE_KB"
+
+            # Explicit archive layout wins when present.
+            if [[ "$cand" == "$ROOT/ios_port_bundle/www" ]]; then
+              SCORE=$((SCORE + 100000000))
+            fi
+
+            # Penalize template built-in web assets so we don't pick tiny default www.
+            case "$cand" in
+              *"/ios-rpgmaker-native/"*|*"/RPG Maker MZ Framework/"*)
+                SCORE=$((SCORE - 90000000))
+                ;;
+            esac
+
+            echo "Candidate: $cand (size=${SIZE_KB}KB score=${SCORE})"
+
+            if (( SCORE > BEST_SCORE )); then
+              BEST_SCORE="$SCORE"
+              GAME_PATH="$cand"
+            fi
+          done
 
           if [[ -z "$GAME_PATH" ]]; then
             echo "ERROR: Could not find valid game folder (index.html + data + tyrano)."
@@ -159,15 +178,8 @@ jobs:
             PROJECT="$(find "$ROOT" -name "*.xcodeproj" -print -quit || true)"
           fi
 
-          # Fallback: clone template repo if archive has no xcode project.
           if [[ -z "$PROJECT" ]]; then
-            echo "No .xcodeproj in archive, cloning fallback template repo."
-            git clone --depth 1 "${{ env.TEMPLATE_REPO }}" _work/template
-            PROJECT="$(find _work/template -name "*.xcodeproj" -print -quit || true)"
-          fi
-
-          if [[ -z "$PROJECT" ]]; then
-            echo "ERROR: No .xcodeproj found in archive or fallback template repo."
+            echo "ERROR: No .xcodeproj found in archive. Please include ios-rpgmaker-native in the uploaded zip."
             exit 1
           fi
 
@@ -219,8 +231,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-      - name: Package IPA
-        id: package
+      - name: Force inject full game into archived app
+        id: force_inject
         shell: bash
         run: |
           set -euo pipefail
@@ -230,6 +242,32 @@ jobs:
             echo "ERROR: No .app found in archive output."
             exit 1
           fi
+
+          rm -rf "$APP_PATH/www"
+          mkdir -p "$APP_PATH/www"
+          rsync -a --delete "${{ steps.resolve_game.outputs.game_path }}/" "$APP_PATH/www/"
+
+          GAME_KB="$(du -sk "${{ steps.resolve_game.outputs.game_path }}" | awk '{print $1}')"
+          APP_WWW_KB="$(du -sk "$APP_PATH/www" | awk '{print $1}')"
+          echo "Game size KB: $GAME_KB"
+          echo "App www size KB: $APP_WWW_KB"
+
+          # Hard fail if archived www is suspiciously small after copy.
+          MIN_EXPECTED=$((GAME_KB * 80 / 100))
+          if (( APP_WWW_KB < MIN_EXPECTED )); then
+            echo "ERROR: Injected app/www is too small compared to source game."
+            exit 1
+          fi
+
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Package IPA
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="${{ steps.force_inject.outputs.app_path }}"
 
           mkdir -p _work/Payload
           cp -R "$APP_PATH" _work/Payload/
