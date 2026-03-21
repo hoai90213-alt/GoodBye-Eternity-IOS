@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       archive_gdrive_id:
-        description: "Google Drive file ID of your .zip archive (optional)"
+        description: "Google Drive file ID of your .zip archive"
         required: false
-        default: "1BXCD6VYO5PbkMTsKV1z4qQgYt3GARlL8"
+        default: "1SCyMKUsUteUcrOYQQYhyDfFMuW3eVz42"
       archive_url:
-        description: "Direct URL of your .zip archive (optional)"
+        description: "Direct URL of your .zip archive (optional fallback)"
         required: false
         default: ""
       ipa_name:
@@ -16,13 +16,9 @@ on:
         required: false
         default: "TF27-iOS"
       template_repo:
-        description: "iOS template git repo URL"
+        description: "Fallback template repo URL if zip has no .xcodeproj"
         required: false
         default: "https://github.com/laguna783/ios-rpgmaker-native.git"
-      template_subdir:
-        description: "Project folder inside template repo"
-        required: false
-        default: "RPG Maker MZ Framework for Xcode 12"
 
 jobs:
   build_ios:
@@ -33,13 +29,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download game archive
+      - name: Download archive from Drive/URL
         shell: bash
         run: |
           set -euo pipefail
 
           python3 -m pip install --upgrade pip gdown
-          mkdir -p _work
+          mkdir -p _work/src
 
           if [[ -n "${{ inputs.archive_gdrive_id }}" ]]; then
             gdown "https://drive.google.com/uc?id=${{ inputs.archive_gdrive_id }}" -O _work/archive.zip
@@ -52,95 +48,119 @@ jobs:
 
           unzip -q -o _work/archive.zip -d _work/src
 
-      - name: Resolve WWW folder
-        id: resolve_www
+      - name: Resolve game folder in archive
+        id: resolve_game
         shell: bash
         run: |
           set -euo pipefail
 
           ROOT="_work/src"
-          WWW=""
+          GAME_PATH=""
 
-          # Case 1: archive built by prepare-ios-ipa.ps1
-          if [[ -d "$ROOT/ios_port_bundle/www" ]]; then
-            WWW="$ROOT/ios_port_bundle/www"
+          # Case 1: archive contains ios_port_bundle/www
+          if [[ -f "$ROOT/ios_port_bundle/www/index.html" ]]; then
+            GAME_PATH="$ROOT/ios_port_bundle/www"
           fi
 
-          # Case 2: contains a ready www folder
-          if [[ -z "$WWW" ]]; then
-            CANDIDATE="$(find "$ROOT" -type d -name "www" -print | head -n1 || true)"
-            if [[ -n "$CANDIDATE" && -f "$CANDIDATE/index.html" ]]; then
-              WWW="$CANDIDATE"
-            fi
-          fi
-
-          # Case 3: raw game root (index.html + data + tyrano)
-          if [[ -z "$WWW" ]]; then
-            CANDIDATE="$(find "$ROOT" -type f -name "index.html" -print | while read -r idx; do
-              base="$(dirname "$idx")"
-              if [[ -d "$base/data" && -d "$base/tyrano" ]]; then
-                echo "$base"
+          # Case 2: any ready www folder containing game web root
+          if [[ -z "$GAME_PATH" ]]; then
+            while IFS= read -r cand; do
+              if [[ -f "$cand/index.html" && -d "$cand/data" && -d "$cand/tyrano" ]]; then
+                GAME_PATH="$cand"
                 break
               fi
-            done)"
-            if [[ -n "$CANDIDATE" ]]; then
-              WWW="$CANDIDATE"
-            fi
+            done < <(find "$ROOT" -type d -name "www" -print)
           fi
 
-          if [[ -z "$WWW" ]]; then
-            echo "ERROR: Could not find a valid web game folder"
+          # Case 3: raw game root anywhere inside archive
+          if [[ -z "$GAME_PATH" ]]; then
+            while IFS= read -r idx; do
+              base="$(dirname "$idx")"
+              if [[ -d "$base/data" && -d "$base/tyrano" ]]; then
+                GAME_PATH="$base"
+                break
+              fi
+            done < <(find "$ROOT" -type f -name "index.html" -print)
+          fi
+
+          if [[ -z "$GAME_PATH" ]]; then
+            echo "ERROR: Could not find valid game folder (index.html + data + tyrano)."
             exit 1
           fi
 
-          echo "Resolved WWW: $WWW"
-          du -sh "$WWW" || true
-          echo "www_path=$WWW" >> "$GITHUB_OUTPUT"
+          echo "Game folder: $GAME_PATH"
+          du -sh "$GAME_PATH" || true
+          echo "game_path=$GAME_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare iOS template project
+      - name: Resolve iOS template/project
+        id: resolve_ios
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="_work/src"
+          PROJECT=""
+
+          # Prefer xcode project already inside zip (your bundled ios-rpgmaker-native).
+          while IFS= read -r cand; do
+            case "$cand" in
+              *ios-rpgmaker-native*|*"RPG Maker MZ Framework"* )
+                PROJECT="$cand"
+                break
+                ;;
+            esac
+          done < <(find "$ROOT" -name "*.xcodeproj" -print)
+
+          # If no preferred match, pick first xcode project from archive.
+          if [[ -z "$PROJECT" ]]; then
+            PROJECT="$(find "$ROOT" -name "*.xcodeproj" -print -quit || true)"
+          fi
+
+          # Fallback: clone template repo if archive has no xcode project.
+          if [[ -z "$PROJECT" ]]; then
+            echo "No .xcodeproj in archive, cloning fallback template repo."
+            git clone --depth 1 "${{ inputs.template_repo }}" _work/template
+            PROJECT="$(find _work/template -name "*.xcodeproj" -print -quit || true)"
+          fi
+
+          if [[ -z "$PROJECT" ]]; then
+            echo "ERROR: No .xcodeproj found in archive or fallback template repo."
+            exit 1
+          fi
+
+          PROJ_DIR="$(dirname "$PROJECT")"
+          echo "Using project: $PROJECT"
+          echo "Project dir: $PROJ_DIR"
+
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "project_dir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Inject game files into template www
         id: prepare_ios
         shell: bash
         run: |
           set -euo pipefail
 
-          git clone --depth 1 "${{ inputs.template_repo }}" _work/template
-
-          PROJ_DIR="_work/template/${{ inputs.template_subdir }}"
-          if [[ ! -d "$PROJ_DIR" ]]; then
-            echo "ERROR: template_subdir not found: $PROJ_DIR"
-            echo "Template tree:"
-            find _work/template -maxdepth 2 -type d -print
-            exit 1
-          fi
+          PROJ_DIR="${{ steps.resolve_ios.outputs.project_dir }}"
 
           rm -rf "$PROJ_DIR/www"
           mkdir -p "$PROJ_DIR/www"
-          rsync -a --delete "${{ steps.resolve_www.outputs.www_path }}/" "$PROJ_DIR/www/"
+          rsync -a --delete "${{ steps.resolve_game.outputs.game_path }}/" "$PROJ_DIR/www/"
 
-          # Patch common WKWebView read access issue.
-          VIEW="$PROJ_DIR/ViewController.swift"
-          if [[ -f "$VIEW" ]]; then
+          # Patch common WKWebView read-access issue.
+          VIEW="$(find "$PROJ_DIR" -maxdepth 3 -name "ViewController.swift" -print -quit || true)"
+          if [[ -n "$VIEW" ]]; then
             sed -i '' 's/allowingReadAccessTo: htmlPath)/allowingReadAccessTo: htmlPath.deletingLastPathComponent())/g' "$VIEW"
           fi
 
-          PROJECT="$(find "$PROJ_DIR" -maxdepth 1 -name "*.xcodeproj" -print -quit || true)"
-          if [[ -z "$PROJECT" ]]; then
-            PROJECT="$(find _work/template -name "*.xcodeproj" -print -quit || true)"
-          fi
-          if [[ -z "$PROJECT" ]]; then
-            echo "ERROR: No .xcodeproj found"
-            exit 1
-          fi
-
+          PROJECT="${{ steps.resolve_ios.outputs.project }}"
           SCHEME="$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{flag=1;next} flag && NF {print; exit}' | xargs)"
           if [[ -z "$SCHEME" ]]; then
-            echo "ERROR: No build scheme found"
+            echo "ERROR: No build scheme found in $PROJECT"
             exit 1
           fi
 
-          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
           echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
-          echo "Using project: $PROJECT"
           echo "Using scheme: $SCHEME"
 
       - name: Build archive
@@ -149,7 +169,7 @@ jobs:
           set -euo pipefail
 
           xcodebuild archive \
-            -project "${{ steps.prepare_ios.outputs.project }}" \
+            -project "${{ steps.resolve_ios.outputs.project }}" \
             -scheme "${{ steps.prepare_ios.outputs.scheme }}" \
             -archivePath "_work/build.xcarchive" \
             -configuration Release \
@@ -164,7 +184,7 @@ jobs:
 
           APP_PATH="$(find "_work/build.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" -print -quit || true)"
           if [[ -z "$APP_PATH" ]]; then
-            echo "ERROR: No .app found in archive output"
+            echo "ERROR: No .app found in archive output."
             exit 1
           fi
 
@@ -176,7 +196,7 @@ jobs:
           ls -lh "$IPA_PATH"
           echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: Upload application
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.ipa_name }}
